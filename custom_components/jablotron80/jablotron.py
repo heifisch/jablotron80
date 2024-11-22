@@ -15,7 +15,7 @@ LOGGER = logging.getLogger(__package__)
 expected_warning_level = logging.WARN
 verbose_connection_logging = False
 _loop = None # global variable to store event loop
-
+on_time = 0 # global variable to store the time when "ON" key was pressed
 
 from typing import Any, Dict, Optional, Union,Callable
 from homeassistant import config_entries
@@ -2181,7 +2181,8 @@ class JA80CentralUnit(object):
 			# multiple things are active
 			if detail == 0x00:
 				# no details... ask..
-				self._send_device_query()				
+				if time.time() > on_time + 10: # interrupts the update for 10 seconds so that inputs can be made on the control unit
+					self._send_device_query()
 			else:
 				self._activate_source(detail)
 				self._confirm_device_query()
@@ -2486,6 +2487,7 @@ class JA80CentralUnit(object):
 			LOGGER.error(f'Unknown state detail received data={packet_data}')
 
 	def _process_message(self, data: bytearray) -> None:
+		global on_time
 		packet_data = format_packet(data)
 		message_type = JablotronMessage.get_message_type_from_record(data,packet_data)
 		if message_type is None:
@@ -2504,7 +2506,10 @@ class JA80CentralUnit(object):
 		elif message_type == JablotronMessage.TYPE_STATE_DETAIL:
 			self._process_state_detail(data, packet_data)
 		elif message_type == JablotronMessage.TYPE_KEYPRESS:
-			#keypress = JablotronMessage.get_keypress_option(data[0]& 0x0f)
+			# keypress = JablotronKeyPress.get_keypress_option(data[0]& 0x0f)
+			# LOGGER.info("Keypress: " + hex(data[0]) + ", " + str(keypress['desc']))
+			if data[0] == 0x8f:
+				on_time = time.time() # sets time when "ON" button was pressed
 			pass
 		elif message_type == JablotronMessage.TYPE_BEEP:
 			beep = JablotronKeyPress.get_beep_option(data[0]& 0x0f)
