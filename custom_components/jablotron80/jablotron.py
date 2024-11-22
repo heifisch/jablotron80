@@ -657,11 +657,13 @@ class JablotronConnection():
 	def __init__(self, device: str) -> None:
 		self._device = device
 		self._cmd_q = queue.Queue()
+		self._cmd_list = []
 		self._output_q = queue.Queue()
 		self._stop = threading.Event()
 		self._connection = None
 		self._messages = asyncio.Event() # are there messages to process
 		self.update_devices = False
+		self._send_cmd = None
 
 	def get_record(self) -> List[bytearray]:
 		
@@ -702,8 +704,10 @@ class JablotronConnection():
 
 		 
 	def add_command(self, command: JablotronCommand) -> None:
-		LOGGER.debug(f'Adding command {command}')
-		self._cmd_q.put(command)
+		if command not in self._cmd_list and command != self._send_cmd:
+			LOGGER.debug(f'Adding command {command}')
+			self._cmd_q.put(command)
+			self._cmd_list.append(command)
 
 	def _get_command(self) -> Union[JablotronCommand,None]:
 		# assume we have a command queue and return command if requested
@@ -712,7 +716,8 @@ class JablotronConnection():
 	 
 		# get one command
 		cmd = self._cmd_q.get_nowait()
-	   
+		list_cmd = self._cmd_list.pop(0)
+
 		return cmd
 	
 	def _forward_records(self,records: List[bytearray]) -> None:
@@ -749,25 +754,28 @@ class JablotronConnection():
 					return []
 				records = self._read_data()
 				self._forward_records(records)
-				send_cmd = self._get_command()
-		
-				if send_cmd is not None:
+				self._send_cmd = self._get_command()
+
+				if self._send_cmd is not None:
 					# new command in queue
 
 					accepted = False
 					confirmed = False
-					retries = 2 # 2 retries signifies 3 attempts
+					if self._send_cmd.name == 'Details':
+						retries = 10
+					else:
+						retries = 2 # 2 retries signifies 3 attempts
 
 					while retries >= 0 and not (accepted and confirmed):
 						level = logging.INFO
-						for i in range(0,len(send_cmd.code)):
-							if i == len(send_cmd.code)-1:
-								accepted_prefix = send_cmd.accepted_prefix
+						for i in range(0,len(self._send_cmd.code)):
+							if i == len(self._send_cmd.code)-1:
+								accepted_prefix = self._send_cmd.accepted_prefix
 							else:
 								accepted_prefix =b'\xa0\xff'
 
-							if not send_cmd.code is None:
-								cmd = self._get_cmd(send_cmd.code[i].to_bytes(1,byteorder='big'))
+							if not self._send_cmd.code is None:
+								cmd = self._get_cmd(self._send_cmd.code[i].to_bytes(1,byteorder='big'))
 								LOGGER.debug(f'Sending keypress, sequence:{i}')
 								self._connection.write(cmd)
 								LOGGER.debug(f'keypress sent, sequence:{i}')
@@ -784,20 +792,20 @@ class JablotronConnection():
 								break # break from for loop into retry loop, has effect of starting full command sequence from scratch
 
 						if accepted:
-							if send_cmd.complete_prefix is not None:
+							if self._send_cmd.complete_prefix is not None:
 								# confirmation required, read until confirmation or to limit
-								if self.read_until_found(send_cmd.complete_prefix, send_cmd.max_records):
-									LOGGER.info(f"command {send_cmd} completed")
+								if self.read_until_found(self._send_cmd.complete_prefix, self._send_cmd.max_records):
+									LOGGER.info(f"command {self._send_cmd} completed")
 								else:
 									if retries == 0:
 										level = logging.WARN	
-									LOGGER.log(level, f"no completion message found for command {send_cmd}")
-									send_cmd.confirm(False)
+									LOGGER.log(level, f"no completion message found for command {self._send_cmd}")
+									self._send_cmd.confirm(False)
 									continue
 									
-							send_cmd.confirm(True)
+							self._send_cmd.confirm(True)
 							confirmed = True
-							if send_cmd.name == 'Details':
+							if self._send_cmd.name == 'Details':
 								self.update_devices = True
 							self._cmd_q.task_done()
 
@@ -1414,6 +1422,7 @@ class JA80CentralUnit(object):
 		self._connection.connect()
 		self._stop = threading.Event()
 		self._havestate = asyncio.Event() # has the first state message been received
+		self._force_query = False
 
 		if CONFIGURATION_CENTRAL_SETTINGS in config:
 			self.mode = config[CONFIGURATION_CENTRAL_SETTINGS][DEVICE_CONFIGURATION_SYSTEM_MODE]
@@ -2138,8 +2147,9 @@ class JA80CentralUnit(object):
 			# something is active
 			if detail == 0x00:
 				# don't send query if we already have "triggered detector" displayed
-				if activity_name not in self.statustext.message or activity_name == self.statustext.message:
-					self._send_device_query()				
+				if activity_name not in self.statustext.message or activity_name == self.statustext.message or self._force_query:
+					self._send_device_query()
+					self._force_query = False
 				else:
 					log = False
 			else:
@@ -2169,7 +2179,7 @@ class JA80CentralUnit(object):
 			else:
 				self._activate_source(detail)
 				self._confirm_device_query()
-
+			self._force_query = True
 		else:
 			warn = True
 			activity_name = f'Unknown Activity:{hex(activity)}'
