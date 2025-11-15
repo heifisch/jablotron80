@@ -2055,6 +2055,15 @@ class JA80CentralUnit(object):
         self._last_state = status
 
         by = detail if detail in [0x06, 0x12] else None
+        if (
+            status != JablotronState.ALARM_A and status != JablotronState.ALARM_A_SPLIT
+            and status != JablotronState.ALARM_B and status != JablotronState.ALARM_B_SPLIT
+            and status != JablotronState.ALARM_C and status != JablotronState.ALARM_WITHOUT_ARMING
+            and status != JablotronState.ALARM_C_SPLIT
+        ):
+            if activity == 0x00:
+                # clear active statuses
+                self._clear_triggers()
 
         if status == JablotronState.ALARM_A or status == JablotronState.ALARM_A_SPLIT:
             self._call_zone(1, by=by, function_name="alarm")
@@ -2064,15 +2073,9 @@ class JA80CentralUnit(object):
             self._call_zones(by, function_name="alarm")
         elif status == JablotronState.ALARM_C_SPLIT:
             self._call_zone(3, by=by, function_name="alarm")
-
         elif status in JablotronState.STATES_DISARMED:
             self.status = JA80CentralUnit.STATUS_NORMAL
             self._call_zones(function_name="disarm")
-
-            if activity == 0x00:  # and not self.led_alarm:
-                # clear active statuses
-                self._clear_triggers()
-
         elif status == JablotronState.ARMED_ABC:
             self._call_zones(by, function_name="armed")
         elif status == JablotronState.ARMED_A:
