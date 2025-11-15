@@ -661,11 +661,13 @@ class JablotronConnection:
     def __init__(self, device: str) -> None:
         self._device = device
         self._cmd_q = asyncio.Queue()
+        self._cmd_list = []
         self._output_q = asyncio.Queue()
         self._stop = asyncio.Event()
         self._connection = None
         self._messages = asyncio.Event()
         self.update_devices = False
+        self._send_cmd = None
 
     def get_record(self) -> List[bytearray]:
         records = []
@@ -700,12 +702,15 @@ class JablotronConnection:
         return self._connection is not None
 
     async def add_command(self, command: JablotronCommand) -> None:
-        LOGGER.debug(f"Adding command {command}")
-        await self._cmd_q.put(command)
+        if command not in self._cmd_list and command != self._send_cmd:
+            LOGGER.debug(f"Adding command {command}")
+            await self._cmd_q.put(command)
+            self._cmd_list.append(command)
 
     async def _get_command(self) -> Union[JablotronCommand, None]:
         if self._cmd_q.empty():
             return None
+        list_cmd = self._cmd_list.pop(0)
         return await self._cmd_q.get()
 
     async def _forward_records(self, records: List[bytearray]) -> None:
@@ -740,22 +745,26 @@ class JablotronConnection:
 
                 records = await self._read_data()
                 await self._forward_records(records)
-                send_cmd = await self._get_command()
+                self._send_cmd = await self._get_command()
 
-                if send_cmd is not None:
+                if self._send_cmd is not None:
+
                     accepted = False
                     confirmed = False
-                    retries = 2
+                    if self._send_cmd.name == 'Details':
+                        retries = 10
+                    else:
+                        retries = 2
 
                     while retries >= 0 and not (accepted and confirmed):
                         level = logging.INFO
-                        for i in range(len(send_cmd.code)):
+                        for i in range(len(self._send_cmd.code)):
                             accepted_prefix = (
-                                send_cmd.accepted_prefix if i == len(send_cmd.code) - 1 else b"\xa0\xff"
+                                self._send_cmd.accepted_prefix if i == len(self._send_cmd.code) - 1 else b"\xa0\xff"
                             )
 
-                            if send_cmd.code is not None:
-                                cmd = self._get_cmd(send_cmd.code[i].to_bytes(1, byteorder="big"))
+                            if self._send_cmd.code is not None:
+                                cmd = self._get_cmd(self._send_cmd.code[i].to_bytes(1, byteorder="big"))
                                 LOGGER.debug(f"Sending keypress, sequence:{i}")
                                 self._connection.write(cmd)  # ideally async
                                 LOGGER.debug(f"keypress sent, sequence:{i}")
@@ -772,20 +781,20 @@ class JablotronConnection:
                                 break
 
                         if accepted:
-                            if send_cmd.complete_prefix is not None:
+                            if self._send_cmd.complete_prefix is not None:
                                 confirmed = await self.read_until_found(
-                                    send_cmd.complete_prefix, send_cmd.max_records
+                                    self._send_cmd.complete_prefix, self._send_cmd.max_records
                                 )
                                 if confirmed:
-                                    LOGGER.info(f"command {send_cmd} completed")
+                                    LOGGER.info(f"command {self._send_cmd} completed")
                                 else:
                                     if retries == 0:
-                                        LOGGER.warning(f"no completion message found for command {send_cmd}")
-                                    send_cmd.confirm(False)
+                                        LOGGER.warning(f"no completion message found for command {self._send_cmd}")
+                                    self._send_cmd.confirm(False)
                                     continue
 
-                            send_cmd.confirm(True)
-                            if send_cmd.name == "Details":
+                            self._send_cmd.confirm(True)
+                            if self._send_cmd.name == "Details":
                                 self.update_devices = True
 
                         retries -= 1
@@ -1455,6 +1464,7 @@ class JA80CentralUnit(object):
 
         self._stop = asyncio.Event()
         self._havestate = asyncio.Event()  # has the first state message been received
+        self._force_query = False
 
         if CONFIGURATION_CENTRAL_SETTINGS in config:
             self.mode = config[CONFIGURATION_CENTRAL_SETTINGS][DEVICE_CONFIGURATION_SYSTEM_MODE]
@@ -2186,8 +2196,9 @@ class JA80CentralUnit(object):
             # something is active
             if detail == 0x00:
                 # don't send query if we already have "triggered detector" displayed
-                if activity_name not in self.statustext.message or activity_name == self.statustext.message:
+                if activity_name not in self.statustext.message or activity_name == self.statustext.message or self._force_query:
                     await self._send_device_query()
+                    self._force_query = False
                 else:
                     log = False
             else:
@@ -2217,6 +2228,7 @@ class JA80CentralUnit(object):
             else:
                 self._activate_source(detail)
                 self._confirm_device_query()
+            self._force_query = True
 
         else:
             warn = True
